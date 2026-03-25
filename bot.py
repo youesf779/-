@@ -920,11 +920,10 @@ def show_admin_glib(admin_uid: int, chat_id: int,
 # ================================================================
 #  🍌  NANOBANANA PRO — GENERATE (txt2img)   ✅ FIXED
 # ================================================================
-def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | None:
+def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | str:
     """
     POST /generate
-    Body: { "prompt": "...", "aspect_ratio": "16:9" }
-    Returns raw image bytes or None on failure.
+    Returns: raw image bytes on success, error string on failure.
     """
     log.info("NanaBanaPro /generate → prompt=%s aspect=%s",
              prompt[:60], aspect_ratio)
@@ -940,14 +939,18 @@ def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | None:
         try:
             data = r.json()
         except Exception:
-            log.error("Generate: response is not JSON → %s", r.text[:500])
-            return None
+            msg = f"Response not JSON (HTTP {r.status_code}):\n{r.text[:400]}"
+            log.error("Generate: %s", msg)
+            return msg
 
-        log.info("Generate response keys: %s | snippet: %s",
-                 list(data.keys()), str(data)[:300])
+        log.info("Generate response: %s", str(data)[:400])
+
+        # ── فحص خطأ صريح من الـ API ──
+        if data.get("error") or data.get("message") and not data.get("success", True):
+            api_err = data.get("error") or data.get("message") or str(data)
+            return f"API error: {api_err}"
 
         # ── Extract image_url flexibly ──
-        # يدعم: image_url / imageUrl / url / output / images[]
         image_url = (
             data.get("image_url")
             or data.get("imageUrl")
@@ -959,8 +962,7 @@ def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | None:
             image_url = imgs[0] if imgs else None
 
         if not image_url:
-            log.error("Generate: no image_url found in response → %s", data)
-            return None
+            return f"No image_url in response:\n{str(data)[:400]}"
 
         log.info("Generate image_url: %s", str(image_url)[:120])
         img_r = requests.get(image_url, timeout=60)
@@ -969,36 +971,32 @@ def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | None:
         return img_r.content
 
     except requests.exceptions.Timeout:
-        log.error("_api_generate: TIMEOUT (240s)")
-        return None
+        msg = "TIMEOUT — الـ API لم يرد خلال 240 ثانية"
+        log.error("_api_generate: %s", msg)
+        return msg
     except Exception as ex:
         log.error("_api_generate error: %s", ex)
-        return None
+        return f"Exception: {ex}"
 
 
 # ================================================================
 #  🍌  NANOBANANA PRO — EDIT (img2img)   ✅ FIXED
 # ================================================================
-def _api_edit(prompt: str, image_urls: list[str]) -> bytes | None:
+def _api_edit(prompt: str, image_urls: list[str]) -> bytes | str:
     """
     POST /edit
-    FIX: الـ API docs تقول image_url (مفرد) في المثال
-         لكن endpoint description تقول image_urls (جمع، max 5)
-         → نبعت الاتنين لضمان التوافق الكامل
+    Returns: raw image bytes on success, error string on failure.
     """
     log.info("NanaBanaPro /edit → prompt=%s images=%d",
              prompt[:60], len(image_urls))
 
-    # ── بناء الـ payload ──
     if len(image_urls) == 1:
-        # صورة واحدة: نبعت مفرد وجمع معاً
         payload = {
             "prompt":     prompt,
-            "image_url":  image_urls[0],   # ← مفرد (curl example)
-            "image_urls": image_urls,       # ← جمع  (endpoint docs)
+            "image_url":  image_urls[0],
+            "image_urls": image_urls,
         }
     else:
-        # أكثر من صورة: جمع فقط
         payload = {
             "prompt":     prompt,
             "image_urls": image_urls,
@@ -1014,17 +1012,20 @@ def _api_edit(prompt: str, image_urls: list[str]) -> bytes | None:
         )
         log.info("Edit HTTP status: %d", r.status_code)
 
-        # ── Parse JSON safely ──
         try:
             data = r.json()
         except Exception:
-            log.error("Edit: response is not JSON → %s", r.text[:500])
-            return None
+            msg = f"Response not JSON (HTTP {r.status_code}):\n{r.text[:400]}"
+            log.error("Edit: %s", msg)
+            return msg
 
-        log.info("Edit response keys: %s | snippet: %s",
-                 list(data.keys()), str(data)[:300])
+        log.info("Edit response: %s", str(data)[:400])
 
-        # ── Extract image_url flexibly ──
+        # ── فحص خطأ صريح من الـ API ──
+        if data.get("error") or data.get("message") and not data.get("success", True):
+            api_err = data.get("error") or data.get("message") or str(data)
+            return f"API error: {api_err}"
+
         image_url = (
             data.get("image_url")
             or data.get("imageUrl")
@@ -1036,8 +1037,7 @@ def _api_edit(prompt: str, image_urls: list[str]) -> bytes | None:
             image_url = imgs[0] if imgs else None
 
         if not image_url:
-            log.error("Edit: no image_url found in response → %s", data)
-            return None
+            return f"No image_url in response:\n{str(data)[:400]}"
 
         log.info("Edit image_url: %s", str(image_url)[:120])
         img_r = requests.get(image_url, timeout=60)
@@ -1046,11 +1046,12 @@ def _api_edit(prompt: str, image_urls: list[str]) -> bytes | None:
         return img_r.content
 
     except requests.exceptions.Timeout:
-        log.error("_api_edit: TIMEOUT (240s)")
-        return None
+        msg = "TIMEOUT — الـ API لم يرد خلال 240 ثانية"
+        log.error("_api_edit: %s", msg)
+        return msg
     except Exception as ex:
         log.error("_api_edit error: %s", ex)
-        return None
+        return f"Exception: {ex}"
 
 
 # ================================================================
@@ -1075,27 +1076,34 @@ def _worker_txt2img(chat_id: int, uid: int, prompt: str,
                 _delete_message(target_cid, wait_msg_id)
             threading.Thread(target=_del_wait, daemon=True).start()
 
-    def err():
+    def err(detail: str = ""):
+        # ── بناء رسالة الخطأ ──
+        safe_detail = detail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = cap_error()
+        if safe_detail:
+            text += f"\n\n<code>{safe_detail[:600]}</code>"
         if pro_mode:
             if gen_msg_id_pro:
                 _delete_message(target_cid, gen_msg_id_pro)
-            _send_message_raw(target_cid, cap_error(),
+            _send_message_raw(target_cid, text,
                               reply_to_message_id=pro_reply_msg_id)
         else:
             user_now = get_user(uid)
             g_id     = user_now.get("home_msg_id")
             if g_id:
                 _delete_message(chat_id, g_id)
-            err_id = _send_message_raw(chat_id, cap_error(), kb_error())
+            err_id = _send_message_raw(chat_id, text, kb_error())
             if err_id:
                 set_user(uid, home_msg_id=err_id, state="idle")
             else:
                 set_user(uid, state="idle")
 
     try:
-        data = _api_generate(prompt, aspect)
-        if not data:
-            err(); return
+        result = _api_generate(prompt, aspect)
+        # isinstance str = error message, bytes = success
+        if isinstance(result, str):
+            err(result); return
+        data = result
 
         if pro_mode:
             if gen_msg_id_pro:
@@ -1120,10 +1128,10 @@ def _worker_txt2img(chat_id: int, uid: int, prompt: str,
             set_user(uid, state="idle",
                      home_msg_id=success_id if success_id else None)
 
-    except Exception:
+    except Exception as ex:
         log.exception("_worker_txt2img unhandled")
         try:
-            err()
+            err(f"Unhandled: {ex}")
         except Exception:
             pass
 
@@ -1140,12 +1148,16 @@ def _worker_img2img(chat_id: int, uid: int, prompt: str,
             _delete_message(chat_id, wait_msg_id)
         threading.Thread(target=_del_wait, daemon=True).start()
 
-    def err():
+    def err(detail: str = ""):
+        safe_detail = detail.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = cap_error()
+        if safe_detail:
+            text += f"\n\n<code>{safe_detail[:600]}</code>"
         user_now = get_user(uid)
         g_id     = user_now.get("home_msg_id")
         if g_id:
             _delete_message(chat_id, g_id)
-        err_id = _send_message_raw(chat_id, cap_error(), kb_error())
+        err_id = _send_message_raw(chat_id, text, kb_error())
         if err_id:
             set_user(uid, home_msg_id=err_id, state="idle",
                      upload_msg_id=None)
@@ -1158,9 +1170,10 @@ def _worker_img2img(chat_id: int, uid: int, prompt: str,
             for fp in file_paths
         ]
 
-        data = _api_edit(prompt, image_urls)
-        if not data:
-            err(); return
+        result = _api_edit(prompt, image_urls)
+        if isinstance(result, str):
+            err(result); return
+        data = result
 
         user2 = get_user(uid)
         g_id  = user2.get("home_msg_id")
@@ -1175,10 +1188,10 @@ def _worker_img2img(chat_id: int, uid: int, prompt: str,
                  home_msg_id=success_id if success_id else None,
                  upload_msg_id=None)
 
-    except Exception:
+    except Exception as ex:
         log.exception("_worker_img2img unhandled")
         try:
-            err()
+            err(f"Unhandled: {ex}")
         except Exception:
             pass
 
