@@ -48,6 +48,12 @@ ADMIN_IDS: list[int] = [7902097354]
 # ── NanoBanana PRO API ─────────────────────────────────────────
 NANABANA_API = "https://nanobananapro-api.up.railway.app"
 
+# ── Webshare Rotating Proxy (لتجاوز حجب Railway IP) ───────────
+PROXIES = {
+    "http":  "http://zjwrjugm:mnr9rrs9q8mz@31.59.20.176:6754/",
+    "https": "http://zjwrjugm:mnr9rrs9q8mz@31.59.20.176:6754/",
+}
+
 ASPECTS = ["1:1", "16:9", "9:16", "4:3", "3:4", "4:5", "5:4", "2:3", "3:2", "21:9"]
 
 MAX_IMAGES      = 5
@@ -921,10 +927,6 @@ def show_admin_glib(admin_uid: int, chat_id: int,
 #  🍌  NANOBANANA PRO — GENERATE (txt2img)   ✅ FIXED
 # ================================================================
 def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | str:
-    """
-    POST /generate
-    Returns: raw image bytes on success, error string on failure.
-    """
     log.info("NanaBanaPro /generate → prompt=%s aspect=%s",
              prompt[:60], aspect_ratio)
     try:
@@ -932,10 +934,10 @@ def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | str:
             f"{NANABANA_API}/generate",
             json={"prompt": prompt, "aspect_ratio": aspect_ratio},
             timeout=240,
+            proxies=PROXIES,          # ← أضف هنا
         )
         log.info("Generate HTTP status: %d", r.status_code)
 
-        # ── Parse JSON safely ──
         try:
             data = r.json()
         except Exception:
@@ -945,12 +947,10 @@ def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | str:
 
         log.info("Generate response: %s", str(data)[:400])
 
-        # ── فحص خطأ صريح من الـ API ──
         if data.get("error") or data.get("message") and not data.get("success", True):
             api_err = data.get("error") or data.get("message") or str(data)
             return f"API error: {api_err}"
 
-        # ── Extract image_url flexibly ──
         image_url = (
             data.get("image_url")
             or data.get("imageUrl")
@@ -965,7 +965,7 @@ def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | str:
             return f"No image_url in response:\n{str(data)[:400]}"
 
         log.info("Generate image_url: %s", str(image_url)[:120])
-        img_r = requests.get(image_url, timeout=60)
+        img_r = requests.get(image_url, timeout=60, proxies=PROXIES)  # ← أضف هنا
         img_r.raise_for_status()
         log.info("Image downloaded (%d bytes)", len(img_r.content))
         return img_r.content
@@ -983,10 +983,6 @@ def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | str:
 #  🍌  NANOBANANA PRO — EDIT (img2img)   ✅ FIXED
 # ================================================================
 def _api_edit(prompt: str, image_urls: list[str]) -> bytes | str:
-    """
-    POST /edit
-    Returns: raw image bytes on success, error string on failure.
-    """
     log.info("NanaBanaPro /edit → prompt=%s images=%d",
              prompt[:60], len(image_urls))
 
@@ -1009,6 +1005,7 @@ def _api_edit(prompt: str, image_urls: list[str]) -> bytes | str:
             f"{NANABANA_API}/edit",
             json=payload,
             timeout=240,
+            proxies=PROXIES,          # ← أضف هنا
         )
         log.info("Edit HTTP status: %d", r.status_code)
 
@@ -1021,7 +1018,6 @@ def _api_edit(prompt: str, image_urls: list[str]) -> bytes | str:
 
         log.info("Edit response: %s", str(data)[:400])
 
-        # ── فحص خطأ صريح من الـ API ──
         if data.get("error") or data.get("message") and not data.get("success", True):
             api_err = data.get("error") or data.get("message") or str(data)
             return f"API error: {api_err}"
@@ -1040,7 +1036,7 @@ def _api_edit(prompt: str, image_urls: list[str]) -> bytes | str:
             return f"No image_url in response:\n{str(data)[:400]}"
 
         log.info("Edit image_url: %s", str(image_url)[:120])
-        img_r = requests.get(image_url, timeout=60)
+        img_r = requests.get(image_url, timeout=60, proxies=PROXIES)  # ← أضف هنا
         img_r.raise_for_status()
         log.info("Edited image downloaded (%d bytes)", len(img_r.content))
         return img_r.content
@@ -1052,7 +1048,6 @@ def _api_edit(prompt: str, image_urls: list[str]) -> bytes | str:
     except Exception as ex:
         log.error("_api_edit error: %s", ex)
         return f"Exception: {ex}"
-
 
 # ================================================================
 #  ⚙️  GENERATION WORKERS
