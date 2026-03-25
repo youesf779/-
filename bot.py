@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ╔════════════════════════════════════════════════════════════════╗
-║            𝑺𝑰𝑫𝑹𝑨 Bot — NanoBanana PRO  v4                   ║
+║            𝑺𝑰𝑫𝑹𝑨 Bot — NanoBanana PRO  v4  (FIXED)          ║
 ╚════════════════════════════════════════════════════════════════╝
   ✅ txt2img  → POST /generate  (prompt + aspect_ratio)
   ✅ img2img  → POST /edit      (prompt + image_urls  max 5)
@@ -12,6 +12,12 @@
   ✅ Single message UI
   ✅ My Library with navigation
   ✅ Admin panel
+
+  🔧 FIXES v4.1:
+     - _api_generate: flexible response parsing (image_url / imageUrl / url / output / images[])
+     - _api_edit: send BOTH image_url (singular) AND image_urls (plural) for max compatibility
+     - Better timeout error logging (Timeout vs generic Exception)
+     - All API errors now log the full response body for debugging
 """
 
 import base64
@@ -44,7 +50,7 @@ NANABANA_API = "https://nanobananapro-api.up.railway.app"
 
 ASPECTS = ["1:1", "16:9", "9:16", "4:3", "3:4", "4:5", "5:4", "2:3", "3:2", "21:9"]
 
-MAX_IMAGES      = 5          # /edit يقبل max 5
+MAX_IMAGES      = 5
 UPLOAD_DEBOUNCE = 2.0
 BROADCAST_DELAY = 0.05
 
@@ -161,7 +167,6 @@ def mark_user_seen(uid: int):
         _save(d)
 
 def add_to_library(uid: int, prompt: str, file_id: str | None = None):
-    """تحفظ الصورة تلقائياً في المكتبة مع file_id فوراً"""
     key = str(uid)
     with _lock:
         d = _load()
@@ -169,17 +174,16 @@ def add_to_library(uid: int, prompt: str, file_id: str | None = None):
             d[key] = _defaults()
         lib = d[key].get("library", [])
         lib.append({
-            "prompt":   prompt,
-            "ts":       time.time(),
-            "file_id":  file_id,
-            "uid":      uid,
+            "prompt":  prompt,
+            "ts":      time.time(),
+            "file_id": file_id,
+            "uid":     uid,
         })
         d[key]["library"]   = lib
         d[key]["lib_index"] = len(lib) - 1
         _save(d)
 
 def update_library_file_id(uid: int, index: int, file_id: str):
-    """تحديث file_id لعنصر موجود في المكتبة"""
     key = str(uid)
     with _lock:
         d = _load()
@@ -253,7 +257,7 @@ def _get_all_user_ids() -> list[int]:
     return [int(k) for k in d if not k.startswith("__") and k.isdigit()]
 
 # ================================================================
-#  📤  EXPORT USERS — username: user_id
+#  📤  EXPORT USERS
 # ================================================================
 def _export_users_file() -> bytes:
     with _lock:
@@ -270,10 +274,7 @@ def _export_users_file() -> bytes:
         username = v.get("username")
         uid      = k
         imgs     = len(v.get("library", []))
-        if username:
-            label = f"@{username}"
-        else:
-            label = name
+        label    = f"@{username}" if username else name
         lines.append(f"{label}: {uid}  [{imgs} images]\n")
         count += 1
     lines.append(f"\n# إجمالي: {count} مستخدم\n")
@@ -298,7 +299,6 @@ _admin_glib_index: dict[int, int] = {}
 # ================================================================
 #  📦  IN-MEMORY IMAGE STORE + DEBOUNCE
 # ================================================================
-# نخزّن (file_path, img_bytes) لكل صورة
 _img_store:     dict[int, list[tuple[str, bytes]]] = {}
 _upload_timers: dict[int, threading.Timer]          = {}
 
@@ -309,8 +309,8 @@ def _cancel_upload_timer(uid: int):
 
 def _fire_upload_counter(chat_id: int, uid: int):
     _upload_timers.pop(uid, None)
-    imgs     = _img_store.get(uid, [])
-    uploaded = len(imgs)
+    imgs      = _img_store.get(uid, [])
+    uploaded  = len(imgs)
     if uploaded == 0:
         return
     remaining = MAX_IMAGES - uploaded
@@ -564,7 +564,6 @@ def cap_aspect_selection(prompt: str) -> str:
         f"{PIN()} <i>{safe}</i>"
     )
 
-# Admin captions
 def cap_admin() -> str:
     return f"{ST()}𝑨𝒅𝒎𝒊𝒏 𝑷𝒂𝒏𝒆𝒍{ST()}\n\n{PIN()} 𝑺𝒆𝒍𝒆𝒄𝒕 𝒂𝒏 𝒐𝒑𝒕𝒊𝒐𝒏:"
 
@@ -919,7 +918,7 @@ def show_admin_glib(admin_uid: int, chat_id: int,
         _send_message_raw(chat_id, cap, mk)
 
 # ================================================================
-#  🍌  NANOBANANA PRO — GENERATE  (txt2img)
+#  🍌  NANOBANANA PRO — GENERATE (txt2img)   ✅ FIXED
 # ================================================================
 def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | None:
     """
@@ -935,56 +934,124 @@ def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | None:
             json={"prompt": prompt, "aspect_ratio": aspect_ratio},
             timeout=240,
         )
-        data = r.json()
-        log.info("Generate response: %s", str(data)[:300])
-        if not data.get("success"):
-            log.error("Generate failed: %s", data)
+        log.info("Generate HTTP status: %d", r.status_code)
+
+        # ── Parse JSON safely ──
+        try:
+            data = r.json()
+        except Exception:
+            log.error("Generate: response is not JSON → %s", r.text[:500])
             return None
-        image_url = data.get("image_url")
+
+        log.info("Generate response keys: %s | snippet: %s",
+                 list(data.keys()), str(data)[:300])
+
+        # ── Extract image_url flexibly ──
+        # يدعم: image_url / imageUrl / url / output / images[]
+        image_url = (
+            data.get("image_url")
+            or data.get("imageUrl")
+            or data.get("url")
+            or data.get("output")
+        )
+        if not image_url and isinstance(data.get("images"), list):
+            imgs = data["images"]
+            image_url = imgs[0] if imgs else None
+
         if not image_url:
-            log.error("Generate: no image_url")
+            log.error("Generate: no image_url found in response → %s", data)
             return None
+
+        log.info("Generate image_url: %s", str(image_url)[:120])
         img_r = requests.get(image_url, timeout=60)
         img_r.raise_for_status()
         log.info("Image downloaded (%d bytes)", len(img_r.content))
         return img_r.content
+
+    except requests.exceptions.Timeout:
+        log.error("_api_generate: TIMEOUT (240s)")
+        return None
     except Exception as ex:
         log.error("_api_generate error: %s", ex)
         return None
 
+
 # ================================================================
-#  🍌  NANOBANANA PRO — EDIT  (img2img)
+#  🍌  NANOBANANA PRO — EDIT (img2img)   ✅ FIXED
 # ================================================================
 def _api_edit(prompt: str, image_urls: list[str]) -> bytes | None:
     """
     POST /edit
-    Body: { "prompt": "...", "image_urls": ["url1", ...] }
-    Returns raw image bytes or None on failure.
+    FIX: الـ API docs تقول image_url (مفرد) في المثال
+         لكن endpoint description تقول image_urls (جمع، max 5)
+         → نبعت الاتنين لضمان التوافق الكامل
     """
     log.info("NanaBanaPro /edit → prompt=%s images=%d",
              prompt[:60], len(image_urls))
+
+    # ── بناء الـ payload ──
+    if len(image_urls) == 1:
+        # صورة واحدة: نبعت مفرد وجمع معاً
+        payload = {
+            "prompt":     prompt,
+            "image_url":  image_urls[0],   # ← مفرد (curl example)
+            "image_urls": image_urls,       # ← جمع  (endpoint docs)
+        }
+    else:
+        # أكثر من صورة: جمع فقط
+        payload = {
+            "prompt":     prompt,
+            "image_urls": image_urls,
+        }
+
+    log.info("Edit payload keys: %s", list(payload.keys()))
+
     try:
         r = requests.post(
             f"{NANABANA_API}/edit",
-            json={"prompt": prompt, "image_urls": image_urls},
+            json=payload,
             timeout=240,
         )
-        data = r.json()
-        log.info("Edit response: %s", str(data)[:300])
-        if not data.get("success"):
-            log.error("Edit failed: %s", data)
+        log.info("Edit HTTP status: %d", r.status_code)
+
+        # ── Parse JSON safely ──
+        try:
+            data = r.json()
+        except Exception:
+            log.error("Edit: response is not JSON → %s", r.text[:500])
             return None
-        image_url = data.get("image_url")
+
+        log.info("Edit response keys: %s | snippet: %s",
+                 list(data.keys()), str(data)[:300])
+
+        # ── Extract image_url flexibly ──
+        image_url = (
+            data.get("image_url")
+            or data.get("imageUrl")
+            or data.get("url")
+            or data.get("output")
+        )
+        if not image_url and isinstance(data.get("images"), list):
+            imgs = data["images"]
+            image_url = imgs[0] if imgs else None
+
         if not image_url:
-            log.error("Edit: no image_url")
+            log.error("Edit: no image_url found in response → %s", data)
             return None
+
+        log.info("Edit image_url: %s", str(image_url)[:120])
         img_r = requests.get(image_url, timeout=60)
         img_r.raise_for_status()
         log.info("Edited image downloaded (%d bytes)", len(img_r.content))
         return img_r.content
+
+    except requests.exceptions.Timeout:
+        log.error("_api_edit: TIMEOUT (240s)")
+        return None
     except Exception as ex:
         log.error("_api_edit error: %s", ex)
         return None
+
 
 # ================================================================
 #  ⚙️  GENERATION WORKERS
@@ -995,12 +1062,10 @@ def _worker_txt2img(chat_id: int, uid: int, prompt: str,
                     pro_chat_id: int | None = None,
                     pro_reply_msg_id: int | None = None,
                     gen_msg_id_pro: int | None = None):
-    """Worker for txt2img — uses /generate endpoint."""
     user       = get_user(uid)
     name       = user.get("display_name", "User")
     target_cid = pro_chat_id if (pro_mode and pro_chat_id) else chat_id
 
-    # Wait message in private chat
     wait_msg_id = None
     if not pro_mode:
         wait_msg_id = _send_message_raw(target_cid, cap_wait())
@@ -1041,7 +1106,6 @@ def _worker_txt2img(chat_id: int, uid: int, prompt: str,
                 _markup([]),
                 reply_to_message_id=pro_reply_msg_id,
             )
-            # ← حفظ تلقائي في المكتبة مع file_id
             add_to_library(uid, prompt, file_id=file_id)
             set_user(uid, state="idle")
         else:
@@ -1052,7 +1116,6 @@ def _worker_txt2img(chat_id: int, uid: int, prompt: str,
             success_id, success_fid = _send_photo_raw(
                 chat_id, data, cap_success(uid, name), kb_success()
             )
-            # ← حفظ تلقائي في المكتبة مع file_id
             add_to_library(uid, prompt, file_id=success_fid)
             set_user(uid, state="idle",
                      home_msg_id=success_id if success_id else None)
@@ -1067,10 +1130,6 @@ def _worker_txt2img(chat_id: int, uid: int, prompt: str,
 
 def _worker_img2img(chat_id: int, uid: int, prompt: str,
                     file_paths: list[str]):
-    """
-    Worker for img2img — builds Telegram public URLs then calls /edit.
-    file_paths: list of Telegram file_path strings
-    """
     user = get_user(uid)
     name = user.get("display_name", "User")
 
@@ -1094,7 +1153,6 @@ def _worker_img2img(chat_id: int, uid: int, prompt: str,
             set_user(uid, state="idle", upload_msg_id=None)
 
     try:
-        # بناء URLs عامة من Telegram
         image_urls = [
             f"https://api.telegram.org/file/bot{BOT_TOKEN}/{fp}"
             for fp in file_paths
@@ -1112,7 +1170,6 @@ def _worker_img2img(chat_id: int, uid: int, prompt: str,
         success_id, success_fid = _send_photo_raw(
             chat_id, data, cap_success(uid, name), kb_success()
         )
-        # ← حفظ تلقائي في المكتبة مع file_id
         add_to_library(uid, prompt, file_id=success_fid)
         set_user(uid, state="idle",
                  home_msg_id=success_id if success_id else None,
@@ -1300,7 +1357,7 @@ def on_pro_cmd(msg: types.Message):
     )
     set_user(uid, aspect_msg_id=asp_id)
 
-# ── Callbacks ─────────────────────────────────────────────────────
+
 @bot.callback_query_handler(func=lambda c: True)
 def on_callback(call: types.CallbackQuery):
     uid  = call.from_user.id
@@ -1351,7 +1408,6 @@ def on_callback(call: types.CallbackQuery):
                                    cap_admin_back())
 
         elif action == "EXPORT":
-            # ← زر تصدير اليوزرات
             stats     = _get_stats()
             file_data = _export_users_file()
             cap_exp   = (
@@ -1433,7 +1489,6 @@ def on_callback(call: types.CallbackQuery):
     if not _require_subscription(uid, cid):
         return
 
-    # Aspect ratio selection
     if data.startswith("ASPECT:"):
         aspect = data[7:]
         user   = get_user(uid)
@@ -1519,7 +1574,6 @@ def on_callback(call: types.CallbackQuery):
         show_library(uid, cid)
 
 
-# ── Text messages ─────────────────────────────────────────────────
 @bot.message_handler(func=lambda m: True, content_types=["text"])
 def on_text(msg: types.Message):
     uid  = msg.from_user.id
@@ -1529,7 +1583,6 @@ def on_text(msg: types.Message):
     if msg.chat.type in ("group", "supergroup", "channel"):
         return
 
-    # Admin state machine
     a_state = _admin_get(uid)
     if uid in ADMIN_IDS and a_state:
         step      = a_state.get("step")
@@ -1577,7 +1630,6 @@ def on_text(msg: types.Message):
                 daemon=True).start()
         return
 
-    # User state machine
     user  = get_user(uid)
     state = user.get("state", "idle")
 
@@ -1617,7 +1669,6 @@ def on_text(msg: types.Message):
             go_home(uid, cid)
 
 
-# ── Photo messages ────────────────────────────────────────────────
 @bot.message_handler(content_types=["photo"])
 def on_photo(msg: types.Message):
     uid    = msg.from_user.id
@@ -1680,17 +1731,16 @@ def on_photo(msg: types.Message):
             _start_i2i(cid, uid, prompt, file_paths)
         return
 
-    # نجيب file_path من Telegram للاستخدام كـ URL
     try:
         fi        = bot.get_file(msg.photo[-1].file_id)
-        file_path = fi.file_path   # مثال: photos/file_123.jpg
+        file_path = fi.file_path
     except Exception as ex:
         bot.reply_to(msg, f"❌ 𝑭𝒂𝒊𝒍𝒆𝒅 𝒕𝒐 𝒈𝒆𝒕 𝒇𝒊𝒍𝒆: {ex}")
         return
 
     if uid not in _img_store:
         _img_store[uid] = []
-    _img_store[uid].append((file_path, b""))  # نخزن file_path فقط
+    _img_store[uid].append((file_path, b""))
 
     if prompt:
         imgs_data  = _img_store.pop(uid, [])
@@ -1702,7 +1752,6 @@ def on_photo(msg: types.Message):
     _schedule_upload_counter(cid, uid)
 
 
-# ── Admin broadcast — other content types ─────────────────────────
 @bot.message_handler(
     func=lambda m: m.from_user.id in ADMIN_IDS and
                    _admin_get(m.from_user.id) is not None and
@@ -1739,7 +1788,6 @@ def on_admin_media(msg: types.Message):
             daemon=True).start()
 
 
-# ── img2img kickoff ───────────────────────────────────────────────
 def _start_i2i(chat_id: int, uid: int, prompt: str,
                file_paths: list[str]):
     upload_msg = get_user(uid).get("upload_msg_id")
@@ -1760,7 +1808,7 @@ def _start_i2i(chat_id: int, uid: int, prompt: str,
 #  🚀  LAUNCH
 # ================================================================
 if __name__ == "__main__":
-    log.info("🍌 SIDRA Bot v4 — NanoBanana PRO API starting…")
+    log.info("🍌 SIDRA Bot v4.1 (FIXED) — NanoBanana PRO API starting…")
     _load_home_image()
     _load_model_status()
     bot.infinity_polling(timeout=60, long_polling_timeout=30)
