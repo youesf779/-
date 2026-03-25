@@ -933,7 +933,7 @@ def _api_generate(prompt: str, aspect_ratio: str = "1:1") -> bytes | str:
         r = requests.post(
             f"{NANABANA_API}/generate",
             json={"prompt": prompt, "aspect_ratio": aspect_ratio},
-            timeout=240,
+            timeout=720,
             proxies=PROXIES,          # ← أضف هنا
         )
         log.info("Generate HTTP status: %d", r.status_code)
@@ -1004,7 +1004,7 @@ def _api_edit(prompt: str, image_urls: list[str]) -> bytes | str:
         r = requests.post(
             f"{NANABANA_API}/edit",
             json=payload,
-            timeout=240,
+            timeout=720,
             proxies=PROXIES,          # ← أضف هنا
         )
         log.info("Edit HTTP status: %d", r.status_code)
